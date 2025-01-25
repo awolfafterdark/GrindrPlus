@@ -1,0 +1,143 @@
+name: Android - Full Auto Build & Ephemeral Signing & Catbox
+
+on:
+  push:
+    branches:
+      - 'master'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) Check out the repository
+      - name: Check out
+        uses: actions/checkout@v3
+
+      # 2) Set up JDK 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      # 3) Make gradlew executable
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # 4) (Optional) Get version info from a Gradle task if you like
+      - name: Get Version Info
+        id: version_info
+        run: |
+          # If you have a Gradle task that prints a line with VERSION_INFO:
+          VERSION_INFO=$(./gradlew printVersionInfo --quiet | grep 'VERSION_INFO:' | sed 's/VERSION_INFO: //;s/ (.*)//')
+          # Fallback if that task doesn't exist, or set a default
+          if [ -z "$VERSION_INFO" ]; then
+            VERSION_INFO="Dev-Build"
+          fi
+          echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
+
+      # 5) Get commit info (optional)
+      - name: Get Commit Info
+        run: |
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          REPO_URL="https://github.com/${{ github.repository }}"
+          COMMIT_URL="${REPO_URL}/commit/${COMMIT_SHA}"
+          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
+          echo "COMMIT_URL=$COMMIT_URL" >> $GITHUB_ENV
+
+      # 6) Build Debug and Release
+      - name: Build Debug
+        run: ./gradlew assembleDebug
+
+      - name: Build Release
+        run: ./gradlew assembleRelease
+
+      # 7) Locate the built APK files
+      - name: Find APKs
+        id: find_apks
+        run: |
+          DEBUG_APK=$(find app/build/outputs/apk/debug/ -name "*.apk")
+          RELEASE_APK=$(find app/build/outputs/apk/release/ -name "*.apk")
+
+          echo "DEBUG_APK=$DEBUG_APK" >> $GITHUB_ENV
+          echo "RELEASE_APK=$RELEASE_APK" >> $GITHUB_ENV
+
+      # 8) Generate an ephemeral keystore
+      - name: Generate Ephemeral Keystore
+        run: |
+          # All password/alias/dname are placeholders; feel free to customize
+          keytool -genkey \
+            -v \
+            -keystore ephemeral.jks \
+            -alias ephemeralKey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 36500 \
+            -storepass ephemeralPass \
+            -keypass ephemeralPass \
+            -dname "CN=AutoSign, OU=GitHubActions, O=Company, L=City, ST=State, C=US" \
+            -storetype JKS
+
+      # 9) Sign the Release APK with apksigner
+      - name: Sign Release APK
+        run: |
+          # Find the latest build-tools
+          BUILD_TOOLS_PATH=$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools/" | sort -V | tail -n 1)
+
+          $BUILD_TOOLS_PATH/apksigner sign \
+            --ks ephemeral.jks \
+            --ks-key-alias ephemeralKey \
+            --ks-pass pass:ephemeralPass \
+            --key-pass pass:ephemeralPass \
+            --out "${{ env.RELEASE_APK }}" \
+            "${{ env.RELEASE_APK }}"
+
+      # 10) Verify the signed APK
+      - name: Verify Signed APK
+        run: |
+          BUILD_TOOLS_PATH=$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools/" | sort -V | tail -n 1)
+          $BUILD_TOOLS_PATH/apksigner verify "${{ env.RELEASE_APK }}"
+          echo "Signed APK verified."
+
+      # 11) Upload Debug APK to Catbox (anonymous)
+      - name: Upload Debug APK to Catbox
+        if: env.DEBUG_APK != ''
+        run: |
+          echo "Uploading Debug APK to Catbox..."
+          DEBUG_CATBOX_URL=$(curl -s -X POST \
+            -F "reqtype=fileupload" \
+            -F "fileToUpload=@${{ env.DEBUG_APK }}" \
+            https://catbox.moe/user/api.php)
+          echo "Debug APK URL on Catbox: $DEBUG_CATBOX_URL"
+          echo "DEBUG_CATBOX_URL=$DEBUG_CATBOX_URL" >> $GITHUB_ENV
+
+      # 12) Upload Signed Release APK to Catbox (anonymous)
+      - name: Upload Release APK to Catbox
+        if: env.RELEASE_APK != ''
+        run: |
+          echo "Uploading Release APK to Catbox..."
+          RELEASE_CATBOX_URL=$(curl -s -X POST \
+            -F "reqtype=fileupload" \
+            -F "fileToUpload=@${{ env.RELEASE_APK }}" \
+            https://catbox.moe/user/api.php)
+          echo "Release APK URL on Catbox: $RELEASE_CATBOX_URL"
+          echo "RELEASE_CATBOX_URL=$RELEASE_CATBOX_URL" >> $GITHUB_ENV
+
+      # 13) (Optional) Upload Debug APK as GitHub Artifact
+      - name: Upload Debug Artifact
+        if: env.DEBUG_APK != ''
+        uses: actions/upload-artifact@v3
+        with:
+          name: Debug-APK
+          path: ${{ env.DEBUG_APK }}
+
+      # 14) (Optional) Upload Release APK (Signed) as GitHub Artifact
+      - name: Upload Release Artifact
+        if: env.RELEASE_APK != ''
+        uses: actions/upload-artifact@v3
+        with:
+          name: Signed-Release-APK
+          path: ${{ env.RELEASE_APK }}
