@@ -1,0 +1,46 @@
+name: Android Unsigned APK Build
+
+on:
+  push:
+    branches: ['*']    # or specify branches like ['main', 'master']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-unsigned-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Install Android SDK (API 34)
+        run: |
+          sdkmanager --install "platforms;android-34" \
+                                 "build-tools;34.0.0" \
+                                 "platform-tools"
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build (Unsigned) Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Find the Release APK
+        id: locate_apk
+        run: |
+          UNSIGNED_APK=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
+          echo "UNSIGNED_APK=$UNSIGNED_APK" >> $GITHUB_ENV
+
+      - name: Upload Unsigned APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: "unsigned-release-apk"
+          path: ${{ env.UNSIGNED_APK }}
